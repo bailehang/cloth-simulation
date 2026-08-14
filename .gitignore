@@ -3,4 +3,3 @@ __pycache__/
 *.pyc
 .taichi/
 imgui.ini
-picture/*.mp4

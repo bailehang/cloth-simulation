@@ -8,6 +8,8 @@
 
 ![GPU 布料模拟演示 3](./picture/demo-03.gif)
 
+[▶ 查看完整 MP4 演示](./picture/bandicam%202026-08-14%2009-58-16-399.mp4)
+
 基于 Python 与 Taichi CUDA 的实时布料物理演示。粒子积分、PBD/XPBD 约束、
 Havok-style 子步进以及 Stanford Bunny 三角网格碰撞均在 GPU kernel 中执行；
 Python 负责 PLY 加载、拓扑生成和交互控制。

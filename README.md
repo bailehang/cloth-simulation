@@ -1,6 +1,12 @@
 # GPU Cloth Simulation（Python / Taichi）
 
-<video src="E:\Haovk2026\cloth-simulation-demo\picture\bandicam 2026-08-14 09-58-16-399.mp4" controls=""></video>
+## 演示效果
+
+![GPU 布料模拟演示 1](./picture/demo-01.gif)
+
+![GPU 布料模拟演示 2](./picture/demo-02.gif)
+
+![GPU 布料模拟演示 3](./picture/demo-03.gif)
 
 基于 Python 与 Taichi CUDA 的实时布料物理演示。粒子积分、PBD/XPBD 约束、
 Havok-style 子步进以及 Stanford Bunny 三角网格碰撞均在 GPU kernel 中执行；
@@ -30,7 +36,7 @@ Python 负责 PLY 加载、拓扑生成和交互控制。
 
 ## 一键启动与测试
 
-![image-20260814100056263](.\picture\image-20260814100056263.png)
+![一键启动 GPU 模拟](./picture/image-20260814100056263.png)
 
 启动 Python/CUDA 模拟直接双击：
 
@@ -48,7 +54,7 @@ start_gpu.bat
 
 网页端展示：
 
-![image-20260814100238631](.\picture\image-20260814100238631.png)
+![启动后的模拟界面](./picture/image-20260814100238631.png)
 
 ```bat
 start_server.bat

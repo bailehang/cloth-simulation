@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cloth Simulation Lab - 布料模拟算法实验室</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="./styles.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.166.1/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.166.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <main class="app-shell">
+      <canvas id="scene"></canvas>
+
+      <!-- Loading overlay -->
+      <div id="bunnyLoading" style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(28,32,40,0.92);color:#e0d8c8;padding:24px 40px;border-radius:12px;font-size:14px;z-index:100;text-align:center;border:1px solid rgba(200,160,112,0.3);">
+        <div style="margin-bottom:8px;font-size:16px;font-weight:500;color:#c8a070;">Stanford Bunny</div>
+        <div>正在加载扫描模型数据...</div>
+      </div>
+
+      <!-- Left control panel -->
+      <section class="control-surface" aria-label="布料模拟控制台">
+        <header class="brand-row">
+          <div>
+            <p class="eyebrow">Cloth Simulation Lab · Stanford Bunny</p>
+            <h1>布料模拟算法实验室</h1>
+          </div>
+          <button class="icon-button" id="pauseButton" type="button" title="暂停 / 继续" aria-label="暂停 / 继续">
+            <span id="pauseIcon">||</span>
+          </button>
+        </header>
+
+        <div class="metric-strip" aria-label="性能指标">
+          <div>
+            <span id="fpsValue">--</span>
+            <small>FPS</small>
+          </div>
+          <div>
+            <span id="particleValue">--</span>
+            <small>粒子数</small>
+          </div>
+          <div>
+            <span id="constraintValue">--</span>
+            <small>约束数</small>
+          </div>
+        </div>
+
+        <!-- Algorithm selector -->
+        <section class="control-group">
+          <div class="group-title">求解算法</div>
+          <div class="algorithm-list" id="algorithmList">
+            <button class="algorithm-button active" data-algo="pbd" type="button">
+              <span class="algorithm-code">PBD</span>
+              <span class="algorithm-copy">
+                <strong>PBD 位置约束动力学</strong>
+                <small>Position Based Dynamics, Muller et al. 2007</small>
+              </span>
+            </button>
+            <button class="algorithm-button" data-algo="xpbd" type="button">
+              <span class="algorithm-code">XPBD</span>
+              <span class="algorithm-copy">
+                <strong>XPBD 扩展位置约束</strong>
+                <small>Extended PBD with compliance, Macklin 2016</small>
+              </span>
+            </button>
+            <button class="algorithm-button" data-algo="havok" type="button">
+              <span class="algorithm-code">Havok</span>
+              <span class="algorithm-copy">
+                <strong>Havok-style 稳定约束投影</strong>
+                <small>Semi-implicit integration + adaptive substep</small>
+              </span>
+            </button>
+          </div>
+        </section>
+
+        <!-- Cloth type selector -->
+        <section class="control-group">
+          <div class="group-title">布料类型</div>
+          <div class="segmented" id="clothTypeButtons" style="grid-template-columns: repeat(3, 1fr);">
+            <button class="active" data-cloth="cape" type="button">披风</button>
+            <button data-cloth="skirt" type="button">围巾</button>
+            <button data-cloth="hair" type="button">耳饰</button>
+          </div>
+        </section>
+
+        <!-- Parameters -->
+        <section class="control-group">
+          <div class="group-title">物理参数</div>
+
+          <div class="slider-row">
+            <label>重力</label>
+            <input type="range" id="gravitySlider" min="0" max="30" step="0.5" value="9.8" />
+            <span class="slider-value" id="gravityValue">9.8</span>
+          </div>
+
+          <div class="slider-row">
+            <label>风力</label>
+            <input type="range" id="windSlider" min="0" max="20" step="0.5" value="3" />
+            <span class="slider-value" id="windValue">3.0</span>
+          </div>
+
+          <div class="slider-row">
+            <label>刚度</label>
+            <input type="range" id="stiffnessSlider" min="1" max="100" step="1" value="50" />
+            <span class="slider-value" id="stiffnessValue">50</span>
+          </div>
+
+          <div class="slider-row">
+            <label>迭代次数</label>
+            <input type="range" id="iterationSlider" min="1" max="20" step="1" value="5" />
+            <span class="slider-value" id="iterationValue">5</span>
+          </div>
+
+          <div class="slider-row">
+            <label>阻尼</label>
+            <input type="range" id="dampingSlider" min="0" max="0.1" step="0.005" value="0.02" />
+            <span class="slider-value" id="dampingValue">0.02</span>
+          </div>
+        </section>
+
+        <!-- Actions -->
+        <section class="control-group">
+          <div class="group-title">交互</div>
+          <div class="toggle-grid">
+            <label><input type="checkbox" id="windToggle" checked /> 风场</label>
+            <label><input type="checkbox" id="collideToggle" checked /> 碰撞</label>
+            <label><input type="checkbox" id="wireToggle" /> 线框</label>
+            <label><input type="checkbox" id="autoRotateToggle" checked /> 自动旋转</label>
+          </div>
+          <button class="wide-button" id="resetButton" type="button" style="margin-top: 8px;">重置布料</button>
+          <button class="wide-button" id="walkButton" type="button" style="margin-top: 6px;">Bunny 蹦跳</button>
+        </section>
+      </section>
+
+      <!-- Right info panel -->
+      <aside class="info-surface" id="infoPanel">
+        <div class="info-head">
+          <div class="info-head-left">
+            <span class="info-code" id="infoCode">PBD</span>
+            <div class="info-title-wrap">
+              <strong id="infoTitle">PBD 位置约束动力学</strong>
+              <small id="infoAuthor">Muller, Heidelberger, Hennix, Ratcliff (2007)</small>
+            </div>
+          </div>
+          <div class="info-head-right">
+            <span class="info-status" id="infoStatus">运行中</span>
+            <button class="icon-button info-collapse" id="infoCollapse" type="button">_</button>
+          </div>
+        </div>
+        <div class="info-body" id="infoBody">
+          <!-- Filled by JS -->
+        </div>
+      </aside>
+
+      <!-- Bottom legend -->
+      <div class="legend-surface">
+        <span><span class="legend-dot" style="background: var(--teal);"></span> 布料粒子</span>
+        <span><span class="legend-dot" style="background: var(--green);"></span> 距离约束</span>
+        <span><span class="legend-dot" style="background: var(--amber);"></span> 弯曲约束</span>
+        <span><span class="legend-dot" style="background: var(--rose);"></span> 模型三角面碰撞</span>
+      </div>
+    </main>
+
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>

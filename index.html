@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Cloth Simulation Lab - 布料模拟算法实验室</title>
+    <title>Python GPU Cloth Simulation - 网页同步预览</title>
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="./styles.css" />
     <script type="importmap">
@@ -29,8 +29,8 @@
       <section class="control-surface" aria-label="布料模拟控制台">
         <header class="brand-row">
           <div>
-            <p class="eyebrow">Cloth Simulation Lab · Stanford Bunny</p>
-            <h1>布料模拟算法实验室</h1>
+            <p class="eyebrow">Python / Taichi CUDA · WebGL 同步预览</p>
+            <h1>GPU 布料模拟实验室</h1>
           </div>
           <button class="icon-button" id="pauseButton" type="button" title="暂停 / 继续" aria-label="暂停 / 继续">
             <span id="pauseIcon">||</span>
@@ -49,6 +49,10 @@
           <div>
             <span id="constraintValue">--</span>
             <small>约束数</small>
+          </div>
+          <div>
+            <span id="contactValue">0</span>
+            <small>模型接触</small>
           </div>
         </div>
 
@@ -74,7 +78,7 @@
               <span class="algorithm-code">Havok</span>
               <span class="algorithm-copy">
                 <strong>Havok-style 稳定约束投影</strong>
-                <small>Semi-implicit integration + adaptive substep</small>
+                <small>Semi-implicit integration + fixed 3 substeps</small>
               </span>
             </button>
           </div>
@@ -85,7 +89,7 @@
           <div class="group-title">布料类型</div>
           <div class="segmented" id="clothTypeButtons" style="grid-template-columns: repeat(3, 1fr);">
             <button class="active" data-cloth="cape" type="button">披风</button>
-            <button data-cloth="skirt" type="button">围巾</button>
+            <button data-cloth="scarf" type="button">长围巾</button>
             <button data-cloth="hair" type="button">耳饰</button>
           </div>
         </section>
@@ -102,8 +106,14 @@
 
           <div class="slider-row">
             <label>风力</label>
-            <input type="range" id="windSlider" min="0" max="20" step="0.5" value="3" />
+            <input type="range" id="windSlider" min="0" max="100" step="1" value="3" />
             <span class="slider-value" id="windValue">3.0</span>
+          </div>
+
+          <div class="wind-presets" aria-label="风力快捷预设">
+            <button data-wind="35" type="button">强风 35</button>
+            <button data-wind="70" type="button">暴风 70</button>
+            <button data-wind="100" type="button">极限风 100</button>
           </div>
 
           <div class="slider-row">
@@ -114,8 +124,8 @@
 
           <div class="slider-row">
             <label>迭代次数</label>
-            <input type="range" id="iterationSlider" min="1" max="20" step="1" value="5" />
-            <span class="slider-value" id="iterationValue">5</span>
+            <input type="range" id="iterationSlider" min="1" max="20" step="1" value="6" />
+            <span class="slider-value" id="iterationValue">6</span>
           </div>
 
           <div class="slider-row">
@@ -164,7 +174,8 @@
         <span><span class="legend-dot" style="background: var(--teal);"></span> 布料粒子</span>
         <span><span class="legend-dot" style="background: var(--green);"></span> 距离约束</span>
         <span><span class="legend-dot" style="background: var(--amber);"></span> 弯曲约束</span>
-        <span><span class="legend-dot" style="background: var(--rose);"></span> 模型三角面碰撞</span>
+        <span><span class="legend-dot" style="background: var(--rose);"></span> Bunny 三角面防穿模</span>
+        <span><span class="legend-dot" style="background: var(--violet);"></span> Python 参数同步</span>
       </div>
     </main>
 

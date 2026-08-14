@@ -67,7 +67,7 @@ h1 {
 }
 
 .metric-strip {
-  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 12px 0;
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 12px 0;
 }
 
 .metric-strip div {
@@ -153,6 +153,23 @@ h1 {
 
 .slider-value {
   font-size: 12px; font-weight: 800; text-align: right; color: var(--teal);
+}
+
+.wind-presets {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px;
+  margin: 2px 0 10px 68px;
+}
+
+.wind-presets button {
+  min-width: 0; min-height: 30px; padding: 4px 5px; border-radius: 7px;
+  border: 1px solid rgba(46, 230, 214, 0.28); color: var(--teal);
+  background: rgba(46, 230, 214, 0.08); font-size: 11px; font-weight: 750;
+  cursor: pointer;
+}
+
+.wind-presets button:hover,
+.wind-presets button.active {
+  border-color: rgba(46, 230, 214, 0.75); background: rgba(46, 230, 214, 0.2);
 }
 
 .toggle-grid {
@@ -291,4 +308,5 @@ h1 {
 @media (max-width: 420px) {
   .toggle-grid, .metric-strip { grid-template-columns: 1fr; }
   .slider-row { grid-template-columns: 50px 1fr 36px; }
+  .wind-presets { margin-left: 58px; }
 }

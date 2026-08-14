@@ -8,7 +8,10 @@ loads the PLY mesh, and drives the GGUI controls.
 import argparse
 import json
 import math
+import os
+import sys
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,7 +23,11 @@ ROOT = Path(__file__).resolve().parent
 MAX_PARTICLES = 8192
 MAX_CONSTRAINTS = 40000
 MAX_RENDER_INDICES = 120000
-CLOTH_THICKNESS = 0.012
+# Render/collision safety envelope.  It is intentionally larger than the
+# visual surface epsilon so constraint projection cannot reveal z-fighting.
+CLOTH_THICKNESS = 0.022
+MAX_PARTICLE_STEP = 0.032
+MAX_WIND = 100.0
 
 ALGORITHMS = {"pbd": 0, "xpbd": 1, "havok": 2}
 CLOTH_TYPES = {"cape", "scarf", "hair"}
@@ -144,10 +151,12 @@ def build_cape(mesh: MeshData) -> ClothData:
     cols, rows, spacing = 18, 19, 0.045
     size = mesh.bounds_max - mesh.bounds_min
     head_y = size[1] * 0.72
-    back_z = -size[2] * 0.35
+    front_z = size[2] * 0.35
     body_radius = size[0] * 0.4
     start_x = -((cols - 1) * spacing) * 0.5
-    start_z = back_z - body_radius * 0.08
+    # Python demo cape hangs in front of the Bunny. The small positive
+    # clearance gives the collision solver room to settle the four anchors.
+    start_z = front_z + body_radius * 0.08
     positions = [
         (start_x + column * spacing, head_y + 0.02 - row * spacing, start_z)
         for row in range(rows)
@@ -429,7 +438,12 @@ class GpuClothSimulation:
                 self.velocity[index].y -= gravity * dt
                 self.velocity[index] += wind_direction * wind * dt * 0.5
                 self.velocity[index] *= damping_factor
-                self.x[index] += self.velocity[index] * dt
+                displacement = self.velocity[index] * dt
+                displacement_length = displacement.norm()
+                if displacement_length > MAX_PARTICLE_STEP:
+                    displacement *= MAX_PARTICLE_STEP / displacement_length
+                    self.velocity[index] = displacement / dt
+                self.x[index] += displacement
 
     @ti.kernel
     def reset_lagrange(self, count: ti.i32):
@@ -503,8 +517,9 @@ class GpuClothSimulation:
         dim_z: ti.i32,
     ):
         for index in range(count):
-            if self.inv_mass[index] > 0.0:
-                local = self.x[index] - self.bunny_offset[None]
+            local = self.x[index] - self.bunny_offset[None]
+            # Include both dynamic particles and zero-inverse-mass anchors.
+            if self.inv_mass[index] >= 0.0:
                 coordinate = ti.cast(
                     ti.floor((local - ti.Vector([grid_min_x, grid_min_y, grid_min_z])) / cell_size), ti.i32
                 )
@@ -535,13 +550,21 @@ class GpuClothSimulation:
                 if found == 1:
                     signed_distance = (local - best_point).dot(best_normal)
                     if signed_distance < CLOTH_THICKNESS:
-                        self.x[index] = best_point + best_normal * CLOTH_THICKNESS + self.bunny_offset[None]
-                        normal_speed = self.velocity[index].dot(best_normal)
-                        if normal_speed < 0.0:
-                            self.velocity[index] -= best_normal * normal_speed
-                        self.velocity[index] *= 0.997
+                        resolved = best_point + best_normal * CLOTH_THICKNESS + self.bunny_offset[None]
+                        self.x[index] = resolved
+                        if self.inv_mass[index] == 0.0:
+                            # Move the persistent anchor itself outside the mesh;
+                            # otherwise update_pins() would reinsert it every step.
+                            self.pin_position[index] = resolved - self.bunny_offset[None]
+                            self.previous[index] = resolved
+                            self.velocity[index] = ti.Vector([0.0, 0.0, 0.0])
+                        else:
+                            normal_speed = self.velocity[index].dot(best_normal)
+                            if normal_speed < 0.0:
+                                self.velocity[index] -= best_normal * normal_speed
+                            self.velocity[index] *= 0.997
                         ti.atomic_add(self.contact_count[None], 1)
-                if self.x[index].y < 0.015:
+                if self.inv_mass[index] > 0.0 and self.x[index].y < 0.015:
                     self.x[index].y = 0.015
                     if self.velocity[index].y < 0.0:
                         self.velocity[index].y *= -0.15
@@ -581,7 +604,9 @@ class GpuClothSimulation:
         if self.paused:
             return
         self.contact_count[None] = 0
-        substeps = 2 if self.algorithm == ALGORITHMS["havok"] else 1
+        # At least two physics substeps keep the swept displacement below the
+        # local collision-cell scale. Havok-style uses one additional substep.
+        substeps = 3 if self.algorithm == ALGORITHMS["havok"] else 2
         sub_dt = dt / substeps
         for _ in range(substeps):
             self.update_pins(self.particle_count)
@@ -604,6 +629,9 @@ class GpuClothSimulation:
                 self.apply_corrections(self.particle_count)
                 self.collide()
             self.update_velocity(self.particle_count, sub_dt)
+            # Velocity reconstruction can reintroduce an inward component.
+            # A final collision pass removes it after all constraints settle.
+            self.collide()
         self.update_bunny_render_vertices()
 
     def stats(self) -> dict[str, object]:
@@ -643,7 +671,7 @@ def run_headless(simulation: GpuClothSimulation, steps: int, dt: float) -> None:
         raise SystemExit("Simulation produced non-finite particle positions")
 
 
-def run_window(simulation: GpuClothSimulation) -> None:
+def run_window(simulation: GpuClothSimulation, run_seconds: float = 0.0) -> None:
     window = ti.ui.Window("GPU Cloth Simulation Lab - Taichi CUDA", (1280, 760), vsync=True)
     canvas = window.get_canvas()
     canvas.set_background_color((0.035, 0.045, 0.065))
@@ -655,14 +683,31 @@ def run_window(simulation: GpuClothSimulation) -> None:
     gui = window.get_gui()
     start = time.perf_counter()
     previous = start
+    orbit_yaw = 0.0
+    orbit_pitch = 0.12
+    orbit_radius = 4.1
+    orbit_speed = 0.35
+    auto_orbit = False
+    last_orbit_cursor: tuple[float, float] | None = None
 
     while window.running:
         now = time.perf_counter()
         frame_dt = min(now - previous, 1.0 / 30.0)
         previous = now
-        camera.track_user_inputs(window, movement_speed=0.03, hold_key=ti.ui.RMB)
 
-        with gui.sub_window("GPU Cloth Controls", 0.015, 0.02, 0.27, 0.62):
+        cursor = window.get_cursor_pos()
+        if window.is_pressed(ti.ui.RMB):
+            if last_orbit_cursor is not None:
+                delta_x = cursor[0] - last_orbit_cursor[0]
+                delta_y = cursor[1] - last_orbit_cursor[1]
+                orbit_yaw -= delta_x * math.tau * 1.2
+                orbit_pitch = max(-1.25, min(1.25, orbit_pitch + delta_y * math.pi * 1.5))
+                auto_orbit = False
+            last_orbit_cursor = cursor
+        else:
+            last_orbit_cursor = None
+
+        with gui.sub_window("GPU Cloth Controls", 0.015, 0.02, 0.27, 0.80):
             gui.text(f"Backend: {ti.lang.impl.current_cfg().arch} | particles: {simulation.particle_count}")
             gui.text(f"Constraints: {simulation.constraint_count} | contacts: {int(simulation.contact_count[None])}")
             if gui.button("PBD"):
@@ -673,12 +718,21 @@ def run_window(simulation: GpuClothSimulation) -> None:
                 simulation.algorithm = ALGORITHMS["havok"]
             if gui.button("Cape"):
                 simulation.set_cloth("cape")
-            if gui.button("Scarf x5"):
+            if gui.button("Long scarf"):
                 simulation.set_cloth("scarf")
             if gui.button("Ear ornaments"):
                 simulation.set_cloth("hair")
             simulation.gravity = gui.slider_float("Gravity", simulation.gravity, 0.0, 30.0)
-            simulation.wind = gui.slider_float("Wind", simulation.wind, 0.0, 20.0)
+            simulation.wind = gui.slider_float("Wind (0-100)", simulation.wind, 0.0, MAX_WIND)
+            if gui.button("Strong wind (35)"):
+                simulation.wind = 35.0
+                simulation.wind_enabled = True
+            if gui.button("Storm (70)"):
+                simulation.wind = 70.0
+                simulation.wind_enabled = True
+            if gui.button("Extreme wind (100)"):
+                simulation.wind = MAX_WIND
+                simulation.wind_enabled = True
             simulation.stiffness = gui.slider_float("Stiffness", simulation.stiffness, 0.02, 1.0)
             simulation.iterations = gui.slider_int("Iterations", simulation.iterations, 1, 20)
             simulation.damping = gui.slider_float("Damping", simulation.damping, 0.0, 0.1)
@@ -690,6 +744,40 @@ def run_window(simulation: GpuClothSimulation) -> None:
                 simulation.set_cloth(simulation.cloth_type)
             if gui.button("Bunny hop"):
                 simulation.bunny_offset_value = 0.18
+
+        with gui.sub_window("Camera Controls", 0.72, 0.02, 0.265, 0.42):
+            gui.text("RMB drag: orbit around Bunny")
+            gui.text("Use Distance to zoom in / out")
+            auto_orbit = gui.checkbox("Auto orbit", auto_orbit)
+            orbit_speed = gui.slider_float("Orbit speed", orbit_speed, 0.05, 1.5)
+            orbit_radius = gui.slider_float("Distance", orbit_radius, 2.0, 8.0)
+            if gui.button("Front view"):
+                orbit_yaw, orbit_pitch = 0.0, 0.12
+                auto_orbit = False
+            if gui.button("Back view"):
+                orbit_yaw, orbit_pitch = math.pi, 0.12
+                auto_orbit = False
+            if gui.button("Left view"):
+                orbit_yaw, orbit_pitch = -math.pi * 0.5, 0.12
+                auto_orbit = False
+            if gui.button("Right view"):
+                orbit_yaw, orbit_pitch = math.pi * 0.5, 0.12
+                auto_orbit = False
+            if gui.button("Top view"):
+                orbit_yaw, orbit_pitch = 0.0, 1.18
+                auto_orbit = False
+
+        if auto_orbit:
+            orbit_yaw += frame_dt * orbit_speed
+        target_y = 0.78
+        horizontal_radius = orbit_radius * math.cos(orbit_pitch)
+        camera.position(
+            math.sin(orbit_yaw) * horizontal_radius,
+            target_y + math.sin(orbit_pitch) * orbit_radius,
+            math.cos(orbit_yaw) * horizontal_radius,
+        )
+        camera.lookat(0.0, target_y, 0.0)
+        camera.up(0.0, 1.0, 0.0)
 
         elapsed = now - start
         if simulation.bunny_offset_value > 0.0:
@@ -727,6 +815,8 @@ def run_window(simulation: GpuClothSimulation) -> None:
         scene.particles(simulation.x, radius=0.006, color=(0.12, 0.92, 0.86), index_count=simulation.particle_count)
         canvas.scene(scene)
         window.show()
+        if run_seconds > 0.0 and time.perf_counter() - start >= run_seconds:
+            break
 
 
 def parse_args() -> argparse.Namespace:
@@ -735,8 +825,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cloth", choices=sorted(CLOTH_TYPES), default="cape")
     parser.add_argument("--algorithm", choices=sorted(ALGORITHMS), default="pbd")
     parser.add_argument("--headless", action="store_true", help="Run validation without opening a window")
+    parser.add_argument("--no-collision", action="store_true", help="Disable Bunny mesh collision for diagnostics")
     parser.add_argument("--steps", type=int, default=120)
     parser.add_argument("--dt", type=float, default=1.0 / 60.0)
+    parser.add_argument("--wind", type=float, default=3.0, help="Wind strength from 0 to 100")
+    parser.add_argument("--run-seconds", type=float, default=0.0, help="Automatically close the window after N seconds")
     return parser.parse_args()
 
 
@@ -754,11 +847,25 @@ def main() -> None:
     simulation = GpuClothSimulation(mesh, grid)
     simulation.set_cloth(args.cloth)
     simulation.algorithm = ALGORITHMS[args.algorithm]
+    simulation.wind = max(0.0, min(MAX_WIND, args.wind))
+    simulation.collision_enabled = not args.no_collision
     if args.headless:
         run_headless(simulation, args.steps, args.dt)
     else:
-        run_window(simulation)
+        run_window(simulation, args.run_seconds)
 
 
 if __name__ == "__main__":
-    main()
+    # Taichi 1.7.4's Windows/Python 3.12 runtime can fault during interpreter
+    # teardown after all kernels have completed.  Bypass only that native
+    # destructor path; runtime exceptions still print and return exit code 1.
+    exit_code = 0
+    try:
+        main()
+    except BaseException:  # noqa: BLE001 - command-line entry point boundary
+        traceback.print_exc()
+        exit_code = 1
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    os._exit(exit_code)

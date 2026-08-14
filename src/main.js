@@ -30,7 +30,7 @@ const state = {
   gravity: 9.8,
   windStrength: 3.0,
   stiffness: 50,       // 1-100, 映射到各算法的刚度参数
-  iterations: 5,
+  iterations: 6,
   damping: 0.02,
 
   // 开关
@@ -48,8 +48,10 @@ const state = {
 
 // 接近地面的长款披风；横向分辨率保持适中，避免演示页约束数暴涨。
 const CAPE_CONFIG = Object.freeze({ cols: 18, rows: 19, spacing: 0.045 });
-const SCARF_CONFIG = Object.freeze({ segments: 20, baseRings: 5, lengthMultiplier: 5, ringHeight: 0.07 });
-const CLOTH_THICKNESS = 0.012;
+const SCARF_CONFIG = Object.freeze({ segments: 20, rings: 21, ringHeight: 0.07 });
+// 与 Python/Taichi GPU 版本保持一致的碰撞安全层和单子步位移上限。
+const CLOTH_THICKNESS = 0.022;
+const MAX_PARTICLE_STEP = 0.032;
 
 // ============================================================================
 //  Three.js 场景初始化
@@ -407,14 +409,12 @@ class ClothMesh {
   /**
    * 创建围巾布料 (兔子脖颈处)
    */
-  createSkirt() {
+  createScarf() {
     this.clear();
     const neckY = bunnyData.neckY || 0.85;
     const neckRadius = (bunnyData.bodyRadius || 0.35) * 0.8;
     const hemRadius = (bunnyData.bodyRadius || 0.35) * 1.1;
-    const { segments, baseRings, lengthMultiplier, ringHeight } = SCARF_CONFIG;
-    // 以原来的 4 个纵向间隔为基准放大 5 倍：4 × 5 + 顶环 = 21 环。
-    const rings = (baseRings - 1) * lengthMultiplier + 1;
+    const { segments, rings, ringHeight } = SCARF_CONFIG;
 
     for (let r = 0; r < rings; r++) {
       const t = r / (rings - 1);
@@ -846,6 +846,13 @@ class ClothMesh {
     }
   }
 
+  advanceParticle(particle, dt) {
+    const speed = particle.velocity.length();
+    const maxSpeed = MAX_PARTICLE_STEP / Math.max(dt, 1e-6);
+    if (speed > maxSpeed) particle.velocity.multiplyScalar(maxSpeed / speed);
+    particle.position.addScaledVector(particle.velocity, dt);
+  }
+
   /**
    * 同步渲染几何体
    */
@@ -917,13 +924,14 @@ class ClothMesh {
     const damping = state.damping;
     const stiffness = state.stiffness / 100; // 0-1
     const iterations = state.iterations;
-    const dampingFactor = Math.pow(Math.max(0, 1 - damping), dt * 60);
+    const dampingFactor = Math.exp(-damping * dt * 60);
 
     // Step 1: 施加外力 + 预测位置
+    const elapsed = performance.now() * 0.001;
     const windDir = this._windDirection.set(
-      Math.sin(performance.now() * 0.0005) * 0.6 + 0.4,
-      0,
-      Math.cos(performance.now() * 0.0003) * 0.5 + 0.5
+      0.45 + Math.sin(elapsed * 0.7) * 0.35,
+      0.05,
+      0.65
     ).normalize();
 
     for (const p of this.particles) {
@@ -939,7 +947,7 @@ class ClothMesh {
       // 阻尼
       p.velocity.multiplyScalar(dampingFactor);
       // 半隐式欧拉预测位置: p' = p + v*dt
-      p.position.addScaledVector(p.velocity, dt);
+      this.advanceParticle(p, dt);
     }
 
     // Step 2: 迭代约束投影
@@ -978,6 +986,9 @@ class ClothMesh {
       p.velocity.subVectors(p.position, p.previous).divideScalar(dt);
     }
 
+    // 速度重建后再做一次碰撞，避免约束末次投影重新压入模型。
+    if (state.collideEnabled) this.resolveCollisions();
+
     // 地面碰撞
     for (const p of this.particles) {
       if (p.position.y < 0.02) {
@@ -996,7 +1007,7 @@ class ClothMesh {
     const windStr = state.windEnabled ? state.windStrength : 0;
     const damping = state.damping;
     const iterations = state.iterations;
-    const dampingFactor = Math.pow(Math.max(0, 1 - damping), dt * 60);
+    const dampingFactor = Math.exp(-damping * dt * 60);
 
     // compliance (柔量): 越大越软, 与迭代次数解耦
     // stiffness 1-100 -> compliance 约 1e-5 ~ 5e-4
@@ -1004,10 +1015,11 @@ class ClothMesh {
     const alphaDistance = complianceBase * 1e-5;
     const alphaBending = alphaDistance * 3;
 
+    const elapsed = performance.now() * 0.001;
     const windDir = this._windDirection.set(
-      Math.sin(performance.now() * 0.0005) * 0.6 + 0.4,
-      0,
-      Math.cos(performance.now() * 0.0003) * 0.5 + 0.5
+      0.45 + Math.sin(elapsed * 0.7) * 0.35,
+      0.05,
+      0.65
     ).normalize();
 
     // Step 1: 预测位置 + 重置 lambda
@@ -1019,7 +1031,7 @@ class ClothMesh {
         p.velocity.addScaledVector(windDir, windStr * dt * 0.5);
       }
       p.velocity.multiplyScalar(dampingFactor);
-      p.position.addScaledVector(p.velocity, dt);
+      this.advanceParticle(p, dt);
     }
     for (const c of this.constraints) {
       c.lambda = 0;
@@ -1073,6 +1085,8 @@ class ClothMesh {
       p.velocity.subVectors(p.position, p.previous).divideScalar(dt);
     }
 
+    if (state.collideEnabled) this.resolveCollisions();
+
     // 地面
     for (const p of this.particles) {
       if (p.position.y < 0.02) {
@@ -1083,7 +1097,7 @@ class ClothMesh {
   }
 
   // ========================================================================
-  //  求解器 3: Havok-style (半隐式积分 + 约束投影 + 自适应子步进)
+  //  求解器 3: Havok-style (半隐式积分 + 约束投影 + 三子步)
   //  教学近似，并非 Havok Cloth 内核复现
   // ========================================================================
   solveHavok(dt) {
@@ -1092,24 +1106,15 @@ class ClothMesh {
     const damping = state.damping;
     const stiffness = state.stiffness / 100;
 
-    // === 自适应子步进 ===
-    // Havok Cloth 的核心特性: 根据 velocity 和约束刚度自动决定子步数
-    // 公式: subSteps = clamp(ceil(maxVel * dt / threshold), 1, maxSubSteps)
-    let maxVel = 0;
-    for (const p of this.particles) {
-      if (p.pinned) continue;
-      maxVel = Math.max(maxVel, p.velocity.length());
-    }
-    // 允许的单子步位移不超过最短结构边的一半，网格尺度变化后仍能正确细分。
-    const velThreshold = Math.max(0.01, (this.characteristicLength || 0.04) * 0.5);
-    const maxSubSteps = 8;
-    let subSteps = Math.min(maxSubSteps, Math.max(1, Math.ceil((maxVel * dt) / velThreshold)));
+    // 与当前 Python/Taichi Havok-style 演示一致：固定三个物理子步。
+    const subSteps = 3;
 
     const subDt = dt / subSteps;
+    const elapsed = performance.now() * 0.001;
     const windDir = this._windDirection.set(
-      Math.sin(performance.now() * 0.0005) * 0.6 + 0.4,
-      0,
-      Math.cos(performance.now() * 0.0003) * 0.5 + 0.5
+      0.45 + Math.sin(elapsed * 0.7) * 0.35,
+      0.05,
+      0.65
     ).normalize();
 
     // 半隐式欧拉更新速度后再更新位置；阻尼使用有界的隐式形式。
@@ -1136,7 +1141,7 @@ class ClothMesh {
         }
 
         // 位置更新
-        p.position.addScaledVector(p.velocity, subDt);
+        this.advanceParticle(p, subDt);
       }
 
       // Step 2: 约束投影 (约束集管理)
@@ -1167,6 +1172,7 @@ class ClothMesh {
         // 混合: 保留部分旧速度 (增加稳定性, 减少抖动)
         p.velocity.lerp(newVel, 0.85);
       }
+      if (state.collideEnabled) this.resolveCollisions();
     }
 
     // 地面
@@ -1265,7 +1271,6 @@ class ClothMesh {
     characterGroup.updateMatrixWorld(true);
     const worldToLocal = this._worldToLocal.copy(characterGroup.matrixWorld).invert();
     this._normalMatrix.getNormalMatrix(characterGroup.matrixWorld);
-    const proximity = CLOTH_THICKNESS * 2.5;
     let contactCount = 0;
 
     for (const p of this.particles) {
@@ -1273,7 +1278,9 @@ class ClothMesh {
       const localPosition = this._localPosition.copy(p.position).applyMatrix4(worldToLocal);
       const localPrevious = this._localPrevious.copy(p.previous).applyMatrix4(worldToLocal);
       const hit = collider.segmentCast(localPrevious, localPosition);
-      const contact = hit || collider.closestPoint(localPosition, proximity);
+      // 无扫掠命中时仍查询全局最近三角面。只查 proximity 会漏掉已经
+      // 深入模型的粒子，使强风下的围巾无法被重新推出。
+      const contact = hit || collider.closestPoint(localPosition);
       if (!contact) continue;
 
       if (!hit) {
@@ -1283,7 +1290,10 @@ class ClothMesh {
         if (signedDistance >= CLOTH_THICKNESS) continue;
       }
 
-      p.position.copy(contact.point).addScaledVector(contact.normal, CLOTH_THICKNESS).applyMatrix4(characterGroup.matrixWorld);
+      const resolvedLocal = this._localPosition.copy(contact.point).addScaledVector(contact.normal, CLOTH_THICKNESS);
+      p.position.copy(resolvedLocal).applyMatrix4(characterGroup.matrixWorld);
+      // 固定点也要记住推出后的表面位置，否则下一帧会再次插回模型。
+      if (p.pinned && p.pinLocalPosition) p.pinLocalPosition.copy(resolvedLocal);
       contactCount++;
       const worldNormal = this._worldNormal.copy(contact.normal).applyMatrix3(this._normalMatrix).normalize();
       const inwardVelocity = p.velocity.dot(worldNormal);
@@ -1317,7 +1327,7 @@ function rebuildCloth() {
   if (!bunnyData.loaded) return;
 
   switch (state.clothType) {
-    case "skirt": cloth.createSkirt(); break;
+    case "scarf": cloth.createScarf(); break;
     case "hair": cloth.createHair(); break;
     case "cape": cloth.createCape(); break;
   }
@@ -1388,11 +1398,16 @@ function animate() {
     cloth.updatePinnedPositions(dt);
     cloth.updateCollisionPositions();
 
-    // 求解布料
-    switch (state.algorithm) {
-      case "pbd":   cloth.solvePBD(dt);   break;
-      case "xpbd":  cloth.solveXPBD(dt);  break;
-      case "havok": cloth.solveHavok(dt); break;
+    // Python 版本中 PBD/XPBD 每帧至少两个物理子步；Havok-style
+    // 在求解器内部执行三个子步。
+    const frameSubsteps = state.algorithm === "havok" ? 1 : 2;
+    const subDt = dt / frameSubsteps;
+    for (let substep = 0; substep < frameSubsteps; substep++) {
+      switch (state.algorithm) {
+        case "pbd":   cloth.solvePBD(subDt);   break;
+        case "xpbd":  cloth.solveXPBD(subDt);  break;
+        case "havok": cloth.solveHavok(subDt); break;
+      }
     }
     canvas.dataset.meshContacts = String(state._meshContacts);
 
@@ -1422,6 +1437,7 @@ function updateMetrics() {
   document.getElementById("fpsValue").textContent = state.fps || "--";
   document.getElementById("particleValue").textContent = state.particleCount;
   document.getElementById("constraintValue").textContent = state.constraintCount;
+  document.getElementById("contactValue").textContent = state._meshContacts || 0;
 }
 
 // 算法切换
@@ -1466,8 +1482,23 @@ for (const [sliderId, valueId, stateKey, parseFn, formatFn] of sliders) {
   slider.addEventListener("input", () => {
     state[stateKey] = parseFn(slider.value);
     valueLabel.textContent = formatFn(state[stateKey]);
+    if (stateKey === "windStrength") {
+      document.querySelectorAll(".wind-presets button").forEach(button => button.classList.remove("active"));
+    }
   });
 }
+
+document.querySelectorAll(".wind-presets button").forEach(button => {
+  button.addEventListener("click", () => {
+    const value = Number(button.dataset.wind);
+    state.windStrength = value;
+    state.windEnabled = true;
+    document.getElementById("windSlider").value = String(value);
+    document.getElementById("windValue").textContent = value.toFixed(1);
+    document.getElementById("windToggle").checked = true;
+    document.querySelectorAll(".wind-presets button").forEach(item => item.classList.toggle("active", item === button));
+  });
+});
 
 // 开关
 document.getElementById("windToggle").addEventListener("change", e => state.windEnabled = e.target.checked);
@@ -1579,19 +1610,19 @@ for each particle:
   havok: {
     code: "Havok",
     title: "Havok-style 稳定约束投影",
-    author: "教学近似 - 约束投影 + 自适应子步进",
+    author: "教学近似 - 稳定约束投影 + 固定三子步",
     body: `
       <h3>核心技术路线</h3>
       <p>本模式借鉴 Havok Cloth 公开接口中的<strong>约束集、子步与刚度调节</strong>概念，用半隐式积分和位置/速度修正构成教学近似；它不是 Havok 求解内核的复现。</p>
       <h3>三大特性</h3>
       <ul>
         <li><strong>有界阻尼</strong>: v_new = v / (1 + dt·c), 避免大步长下阻尼翻转</li>
-        <li><strong>自适应子步进</strong>: 根据 maxVelocity 自动决定 subSteps</li>
+        <li><strong>固定三子步</strong>: 与当前 Python/Taichi 演示保持一致</li>
         <li><strong>位置+速度双投影</strong>: 约束同时修正位置和速度</li>
       </ul>
       <h3>算法流程</h3>
-      <code>// 自适应子步数
-subSteps = clamp(ceil(maxVel·dt / threshold), 1, 8)
+      <code>// 高风力下稳定运行的固定子步数
+subSteps = 3
 
 for sub = 1..subSteps:
   subDt = dt / subSteps
@@ -1614,21 +1645,21 @@ for sub = 1..subSteps:
   // 速度混合 (稳定性)
   for each particle:
     v = lerp(v, (p-p_prev)/subDt, 0.85)</code>
-      <h3>自适应子步进公式</h3>
-      <span class="formula">subSteps = clamp(⌈maxVel · dt / threshold⌉, 1, maxSub)
+      <h3>位移安全条件</h3>
+      <span class="formula">subSteps = 3
 
-threshold = 0.5 · minEdge (最短结构边的一半)</span>
+|Δp| ≤ 0.032（每个物理子步）</span>
       <h3>为什么此教学模式更稳定</h3>
       <table class="compare-table">
         <tr><th>特性</th><th>PBD/XPBD</th><th>Havok</th></tr>
         <tr><td>时间积分</td><td>半隐式欧拉</td><td>半隐式欧拉 + 有界阻尼</td></tr>
-        <tr><td>子步进</td><td>固定</td><td>自适应</td></tr>
+        <tr><td>子步进</td><td>固定 2 步</td><td>固定 3 步</td></tr>
         <tr><td>约束投影</td><td>仅位置</td><td>位置+速度</td></tr>
         <tr><td>大步长稳定</td><td>差</td><td>好</td></tr>
         <tr><td>每步开销</td><td>低</td><td>较高</td></tr>
       </table>
       <h3>当前子步数</h3>
-      <p id="havokSubStepInfo">Havok 自适应子步: <strong id="havokSubSteps">--</strong> 步/帧</p>
+      <p id="havokSubStepInfo">Havok 物理子步: <strong id="havokSubSteps">--</strong> 步/帧</p>
     `,
   },
 };
